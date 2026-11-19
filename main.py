@@ -1,44 +1,75 @@
 #!/usr/bin/env python3
-"""news-image-20261118 v2: one broadsheet of 18 November 2026 world news.
+"""news-image-20261118 v2 entrypoint.
 
-The v2 image is pre-rendered (entry.png, 1024x1024, 48 stories): black
-masthead band, a "day in numbers" strip (141 drones, 126 downed, Dow
--561, EU 45bn loan proposed, 950,000 at flood risk in Gaza, Voyager 1
-at 25.9bn km), four lead cards, a 12-card grid, a bigger world map and a
-32-item also-list, plus the date-check box. It supersedes the v1 entry
-(55 stories, UTC timeline, no numbers strip), which scored 98.50% dev
-but ranked 228 of 12,068. This entrypoint only places
-that image at /output/entry.png. No network, no clock, no randomness:
-the same bytes come out on every run.
+Places the pre-rendered v2 broadsheet (48 stories, Wednesday 18 November
+2026) at /output/entry.png, after checking the file is a well-formed
+PNG of the right size. The check walks the PNG chunk structure and
+verifies each chunk's CRC, so a truncated or corrupted copy is refused
+instead of submitted. Standard library only, no network, no clock, no
+randomness: the same bytes come out on every run.
 """
-from pathlib import Path
-import shutil
+import os
 import struct
+import sys
+import zlib
 
-SRC = Path(__file__).resolve().parent / "entry.png"
-DEST = Path("/output/entry.png")
-DIMS = (1024, 1024)
+HERE = os.path.dirname(os.path.abspath(__file__))
+SRC = os.path.join(HERE, "entry.png")
+DEST = "/output/entry.png"
+WANT_SIZE = (1024, 1024)
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
-def validate_png(path):
-    """Check path is a PNG of the expected size; return (width, height)."""
-    head = path.read_bytes()[:33]
-    if head[:8] != b"\x89PNG\r\n\x1a\n":
+def read_chunks(blob):
+    """Yield (kind, payload) for each chunk in a PNG byte string."""
+    if blob[:8] != PNG_MAGIC:
         raise ValueError("not a PNG file")
-    if head[12:16] != b"IHDR":
-        raise ValueError("PNG has no IHDR chunk")
-    dims = struct.unpack(">II", head[16:24])
-    if dims != DIMS:
-        raise ValueError(f"expected {DIMS[0]}x{DIMS[1]}, got {dims[0]}x{dims[1]}")
-    return dims
+    pos = 8
+    while pos + 8 <= len(blob):
+        size, kind = struct.unpack(">I4s", blob[pos:pos + 8])
+        payload = blob[pos + 8:pos + 8 + size]
+        stored_crc, = struct.unpack(">I", blob[pos + 8 + size:pos + 12 + size])
+        actual_crc = zlib.crc32(kind + payload) & 0xFFFFFFFF
+        if stored_crc != actual_crc:
+            raise ValueError("chunk %r has a bad CRC" % kind.decode("latin-1"))
+        yield kind, payload
+        pos += 12 + size
+        if kind == b"IEND":
+            break
 
 
-def place_entry():
-    DEST.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(SRC, DEST)
-    width, height = validate_png(DEST)
-    print(f"wrote {DEST} ({DEST.stat().st_size} bytes, {width}x{height} PNG)")
+def verify_png(path):
+    """Return (width, height) if path is a well-formed PNG of WANT_SIZE."""
+    with open(path, "rb") as handle:
+        blob = handle.read()
+    kinds = []
+    dims = None
+    for kind, payload in read_chunks(blob):
+        kinds.append(kind)
+        if kind == b"IHDR":
+            dims = struct.unpack(">II", payload[:8])
+    if b"IHDR" not in kinds or b"IEND" not in kinds:
+        raise ValueError("PNG is missing IHDR or IEND")
+    if dims != WANT_SIZE:
+        raise ValueError("expected %dx%d, got %dx%d" % (WANT_SIZE + dims))
+    if len(blob) < 100000 or len(blob) > 1000000:
+        raise ValueError("unexpected file size: %d bytes" % len(blob))
+    return dims, len(blob)
+
+
+def main():
+    dims, size = verify_png(SRC)
+    os.makedirs(os.path.dirname(DEST), exist_ok=True)
+    with open(SRC, "rb") as handle:
+        data = handle.read()
+    if len(data) != size:
+        raise ValueError("entry.png changed size while reading")
+    with open(DEST, "wb") as handle:
+        handle.write(data)
+    width, height = verify_png(DEST)[0]
+    print("placed %s (%d bytes, %dx%d PNG)" % (DEST, size, width, height))
+    return 0
 
 
 if __name__ == "__main__":
-    place_entry()
+    sys.exit(main())
