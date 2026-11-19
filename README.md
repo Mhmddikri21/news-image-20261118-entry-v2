@@ -29,6 +29,8 @@ v2 therefore:
 `main.py` copies the pre-rendered `entry.png` (1024x1024, 183,441 bytes)
 to `/output/entry.png` and validates it is a PNG of the expected size.
 No network, no clock, no randomness — the same bytes on every run.
+The validation walks the PNG chunk structure and checks every chunk's
+CRC, so a truncated or corrupted copy is refused instead of submitted.
 
 ## Files
 
